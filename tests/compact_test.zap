@@ -93,9 +93,10 @@ def main():
     for i in range(32):
         nested = "[" + nested + "]"
     bad(signed(header, "{\"x\":" + nested + "}", key), key, "TokenError")
-    auto huge = ""
-    for i in range(50001):
-        huge = huge + "a"
+    auto huge = "a"
+    for i in range(16):
+        huge = huge + huge
+    huge = huge[:50001]
     bad(huge, key, "TokenError")
     auto huge_payload = "{\"x\":\"" + huge + "\"}"
     bad(signed(header, huge_payload, key), key, "TokenError")

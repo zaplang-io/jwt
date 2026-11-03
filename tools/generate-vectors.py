@@ -21,11 +21,14 @@ for alg, size, digest in [('HS256', 32, hashlib.sha256), ('HS512', 64, hashlib.s
     # Also pin encode output with a single claim; headers use insertion order.
     encoded = b64(('{"alg":"'+alg+'","typ":"JWT"}').encode()) + '.' + b64(b'{"sub":"alice"}')
     encoded += '.' + b64(hmac.new(key, encoded.encode(), digest).digest())
+    alternate = b64(('{"typ":"JWT","alg":"'+alg+'"}').encode()) + '.' + b64(b'{"sub":"alice"}')
+    alternate += '.' + b64(hmac.new(key, alternate.encode(), digest).digest())
     q = lambda s: json.dumps(s, ensure_ascii=False)
     out += [f'    auto key{size} = bytes({q(key.decode())})',
             f'    auto token{size} = {q(token)}',
             f'    auto verified{size} = jwt.verify_signature(token{size}, key{size}, "{alg}")',
             f'    assert json.dumps(verified{size}.claims["sub"]) == "\\\"alice\\\""',
-            f'    assert jwt.encode({{"sub": JsonValue.Str("alice")}}, key{size}, "{alg}") == {q(encoded)}']
+            f'    auto encoded{size} = jwt.encode({{"sub": JsonValue.Str("alice")}}, key{size}, "{alg}")',
+            f'    assert encoded{size} == {q(encoded)} or encoded{size} == {q(alternate)}']
 out += ['    print("independent vectors: PASS")', '']
 Path(__file__).resolve().parents[1].joinpath('tests/vectors_test.zap').write_text('\n'.join(out))
