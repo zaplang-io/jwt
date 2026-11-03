@@ -1,4 +1,5 @@
 # Compact signed JWTs. Claim validation is deliberately a separate API/slice.
+import math
 struct VerifiedToken:
     dict[str, JsonValue] header
     dict[str, JsonValue] claims
@@ -122,6 +123,24 @@ def _same_signature(bytes expected, bytes actual) -> bool:
         difference = difference | expected[i] ^ actual[i]
     return difference == 0
 
+def _check_value(JsonValue value, int64 depth = 0):
+    match value:
+        case JsonValue.Object(fields):
+            if depth >= 32:
+                raise "TokenError: JSON nesting exceeds 32"
+            for name in fields:
+                _check_value(fields[name], depth + 1)
+        case JsonValue.Array(items):
+            if depth >= 32:
+                raise "TokenError: JSON nesting exceeds 32"
+            for item in items:
+                _check_value(item, depth + 1)
+        case JsonValue.Float(f):
+            if math.isnan(f) or math.isinf(f):
+                raise "TokenError: nonfinite JSON number"
+        case _:
+            auto ignored = 0
+
 def encode(
     dict[str, JsonValue] claims,
     bytes key,
@@ -137,6 +156,8 @@ def encode(
     for name in headers:
         header[name] = headers[name]
     _header(header, algorithm)
+    _check_value(JsonValue.Object(header))
+    _check_value(JsonValue.Object(claims))
     auto header_text = json.dumps(JsonValue.Object(header))
     auto payload_text = json.dumps(JsonValue.Object(claims))
     if len(bytes(header_text)) > 4096 or len(bytes(payload_text)) > 32768:
@@ -168,4 +189,5 @@ def verify_signature(str token, bytes key, str algorithm) -> VerifiedToken:
         raise "SignatureError: invalid signature"
     auto payload_raw = _decode_segment(parts[1])
     auto claims = _json_object(payload_raw)
+    _check_value(JsonValue.Object(claims))
     return VerifiedToken(header, claims)
