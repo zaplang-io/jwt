@@ -1,0 +1,17 @@
+name: Test
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  assertions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    container: ghcr.io/zaplang-io/zap@sha256:593d82a7938f1fc7f4fb1ead916309089ee17537a1c83ec797bb97a55a82faec
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.3.0
+      - run: zap fmt --check src tests
+      - run: sh tools/run-tests.sh
+      - run: sh tools/check-package.sh
