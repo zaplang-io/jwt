@@ -13,7 +13,7 @@ def bad(str token, bytes key, str category, str algorithm = "HS256"):
         observed = e
         caught = e.startswith(category + ":")
     if not caught:
-        raise "Expected " + category + ", observed " + observed + "; input " + token[:160]
+        raise "Expected " + category + ", observed " + observed + "; input " + hex.encode(bytes(token[:160]))
 
 def bad_encode(
     dict[str, JsonValue] headers,
