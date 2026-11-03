@@ -1,4 +1,5 @@
 import jwt
+import math
 
 def rejected(dict[str, JsonValue] claims, bytes key):
     auto caught = False
@@ -16,8 +17,8 @@ def main():
     jwt.encode({"x": nested}, key, "HS256")
     nested = JsonValue.Array([nested])
     rejected({"x": nested}, key)
-    rejected({"x": JsonValue.Float(float64("nan"))}, key)
-    rejected({"x": JsonValue.Float(float64("inf"))}, key)
+    rejected({"x": JsonValue.Float(math.sqrt(-1.0))}, key)
+    rejected({"x": JsonValue.Float(math.exp(1000.0))}, key)
     auto text = "a"
     for i in range(16):
         text = text + text
