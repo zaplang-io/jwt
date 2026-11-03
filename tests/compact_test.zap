@@ -6,11 +6,14 @@ def signed(str header, str payload, bytes key) -> str:
 
 def bad(str token, bytes key, str category, str algorithm = "HS256"):
     auto caught = False
+    auto observed = "accepted"
     try:
         jwt.verify_signature(token, key, algorithm)
     except Exception as e:
+        observed = e
         caught = e.startswith(category + ":")
-    assert caught
+    if not caught:
+        raise "Expected " + category + ", observed " + observed + "; input " + token[:160]
 
 def bad_encode(
     dict[str, JsonValue] headers,
@@ -19,11 +22,14 @@ def bad_encode(
     str algorithm = "HS256",
 ):
     auto caught = False
+    auto observed = "accepted"
     try:
         jwt.encode({}, key, algorithm, headers)
     except Exception as e:
+        observed = e
         caught = e.startswith(category + ":")
-    assert caught
+    if not caught:
+        raise "Expected encode " + category + ", observed " + observed
 
 def main():
     auto key = b"0123456789abcdef0123456789abcdef"
