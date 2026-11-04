@@ -168,9 +168,7 @@ def encode(
     auto message = base64.urlsafe_encode_nopad(header_text) + "." + base64.urlsafe_encode_nopad(payload_text)
     return message + "." + base64.urlsafe_encode_nopad(_mac(key, message, algorithm))
 
-def verify_signature(str token, bytes key, str algorithm) -> VerifiedToken:
-    # Only authenticates the signature. It does not validate exp/iss/aud/etc.
-    _key(key, algorithm)
+def _compact_parts(str token) -> list[str]:
     if len(bytes(token)) > 50000:
         raise "TokenError: compact token exceeds 50000 bytes"
     auto parts = token.split(".")
@@ -180,6 +178,12 @@ def verify_signature(str token, bytes key, str algorithm) -> VerifiedToken:
         raise "TokenError: encoded JSON size limit exceeded"
     if len(parts[2]) > 86:
         raise "TokenError: signature size limit exceeded"
+    return parts
+
+def verify_signature(str token, bytes key, str algorithm) -> VerifiedToken:
+    # Only authenticates the signature. It does not validate exp/iss/aud/etc.
+    _key(key, algorithm)
+    auto parts = _compact_parts(token)
     auto header_raw = _decode_segment(parts[0])
     auto signature = _decode_segment(parts[2])
     auto header = _json_object(header_raw)
@@ -335,4 +339,233 @@ def decode(
     Policy policy = Policy(),
 ) -> dict[str, JsonValue]:
     auto verified = verify_signature(token, key, algorithm)
+    return _verified_claims(verified, policy, time.time())
+
+# Loaded only from explicitly trusted, offline configuration.
+struct Key:
+    str kid
+    str algorithm
+    bytes material
+    bool can_sign = True
+    bool can_verify = True
+
+struct KeySet:
+    list[Key] keys = []
+
+def _jwk_string(dict[str, JsonValue] fields, str name) -> str:
+    if not name in fields:
+        raise "JWKError: missing required key member " + name
+    match fields[name]:
+        case JsonValue.Str(s):
+            return s
+        case _:
+            raise "JWKError: key member must be a string: " + name
+
+def _key_record(Key key):
+    if len(bytes(key.kid)) == 0 or len(bytes(key.kid)) > 128:
+        raise "JWKError: kid must contain 1 through 128 UTF-8 bytes"
+    if len(key.material) > 8192:
+        raise "JWKError: key material exceeds 8192 bytes"
+    try:
+        _key(key.material, key.algorithm)
+    except Exception:
+        raise "JWKError: unsupported algorithm or insufficient key material"
+    if not key.can_sign and not key.can_verify:
+        raise "JWKError: key must permit sign or verify"
+
+def _parse_jwk(dict[str, JsonValue] fields) -> Key:
+    if _jwk_string(fields, "kty") != "oct":
+        raise "JWKError: only oct keys are supported"
+    auto kid = _jwk_string(fields, "kid")
+    auto algorithm = _jwk_string(fields, "alg")
+    auto encoded = _jwk_string(fields, "k")
+    if len(encoded) > 10923:
+        raise "JWKError: encoded key material exceeds its limit"
+    for name in ["x5u", "x5c", "x5t", "x5t#S256", "jku", "jwk", "crit", "b64"]:
+        if name in fields:
+            raise "JWKError: unsupported key reference or extension"
+    if "use" in fields:
+        if _jwk_string(fields, "use") != "sig":
+            raise "JWKError: key use must be sig"
+    auto can_sign = True
+    auto can_verify = True
+    if "key_ops" in fields:
+        can_sign = False
+        can_verify = False
+        dict[str, bool] seen = {}
+        match fields["key_ops"]:
+            case JsonValue.Array(operations):
+                if len(operations) == 0:
+                    raise "JWKError: key_ops must not be empty"
+                for operation in operations:
+                    auto name = ""
+                    match operation:
+                        case JsonValue.Str(s):
+                            name = s
+                        case _:
+                            raise "JWKError: key_ops entries must be strings"
+                    if name in seen:
+                        raise "JWKError: duplicate key operation"
+                    seen[name] = True
+                    if name == "sign":
+                        can_sign = True
+                    elif name == "verify":
+                        can_verify = True
+                    else:
+                        raise "JWKError: key_ops only supports sign and verify"
+            case _:
+                raise "JWKError: key_ops must be an array"
+    auto material = b""
+    try:
+        material = _decode_segment(encoded)
+    except Exception:
+        raise "JWKError: k must be canonical unpadded base64url"
+    auto key = Key(kid, algorithm, material, can_sign, can_verify)
+    _key_record(key)
+    return key
+
+def _jwk_document(str source) -> dict[str, JsonValue]:
+    if len(bytes(source)) > 1048576:
+        raise "JWKError: key document exceeds 1048576 bytes"
+    try:
+        auto fields = _json_object(bytes(source))
+        _check_value(JsonValue.Object(fields))
+        return fields
+    except Exception:
+        raise "JWKError: invalid or duplicate-member JSON key document"
+
+def load_jwk(str source) -> Key:
+    return _parse_jwk(_jwk_document(source))
+
+def _key_set(KeySet keys):
+    if len(keys.keys) == 0 or len(keys.keys) > 64:
+        raise "JWKError: a key set must contain 1 through 64 keys"
+    dict[str, bool] seen = {}
+    for key in keys.keys:
+        _key_record(key)
+        if key.kid in seen:
+            raise "JWKError: duplicate kid in key set"
+        seen[key.kid] = True
+        for other in keys.keys:
+            if key.algorithm != other.algorithm and key.material == other.material:
+                raise "JWKError: the same key material cannot bind different algorithms"
+
+def load_jwks(str source) -> KeySet:
+    auto fields = _jwk_document(source)
+    if not "keys" in fields:
+        raise "JWKError: missing keys array"
+    list[Key] keys = []
+    match fields["keys"]:
+        case JsonValue.Array(items):
+            if len(items) == 0 or len(items) > 64:
+                raise "JWKError: a key set must contain 1 through 64 keys"
+            for item in items:
+                match item:
+                    case JsonValue.Object(record):
+                        keys.append(_parse_jwk(record))
+                    case _:
+                        raise "JWKError: key set entries must be objects"
+        case _:
+            raise "JWKError: keys must be an array"
+    auto result = KeySet(keys)
+    _key_set(result)
+    return result
+
+def encode_key(
+    dict[str, JsonValue] claims,
+    Key key,
+    dict[str, JsonValue] headers = {},
+) -> str:
+    _key_record(key)
+    if not key.can_sign:
+        raise "JWKError: key does not permit signing"
+    dict[str, JsonValue] copied = {}
+    for name in headers:
+        copied[name] = headers[name]
+    if "kid" in copied:
+        match copied["kid"]:
+            case JsonValue.Str(s):
+                if s != key.kid:
+                    raise "JWKError: signing header kid conflicts with key"
+            case _:
+                raise "JWKError: signing header kid must be a string"
+    copied["kid"] = JsonValue.Str(key.kid)
+    return encode(claims, key.material, key.algorithm, copied)
+
+def _allowed_algorithms(list[str] algorithms):
+    if len(algorithms) == 0 or len(algorithms) > 2:
+        raise "AlgorithmError: supply 1 or 2 supported algorithms"
+    dict[str, bool] seen = {}
+    for algorithm in algorithms:
+        _signature_size(algorithm)
+        if algorithm in seen:
+            raise "AlgorithmError: allowed algorithms must be unique"
+        seen[algorithm] = True
+
+def _select_key(str token, KeySet keys, list[str] algorithms) -> Key:
+    _allowed_algorithms(algorithms)
+    # Validate even directly constructed or subsequently mutated configurations.
+    # Duplicate IDs are never resolved by order or by trying arbitrary keys.
+    _key_set(keys)
+    auto parts = _compact_parts(token)
+    auto header = _json_object(_decode_segment(parts[0]))
+    if not "alg" in header:
+        raise "AlgorithmError: missing alg header"
+    auto algorithm = ""
+    match header["alg"]:
+        case JsonValue.Str(s):
+            algorithm = s
+        case _:
+            raise "AlgorithmError: alg must be a string"
+    auto allowed = False
+    for candidate in algorithms:
+        if candidate == algorithm:
+            allowed = True
+    if not allowed:
+        raise "AlgorithmError: token algorithm is not allowed"
+    _header(header, algorithm)
+    if not "kid" in header:
+        raise "KeySelectionError: missing kid"
+    auto kid = ""
+    match header["kid"]:
+        case JsonValue.Str(s):
+            kid = s
+        case _:
+            raise "KeySelectionError: kid must be a string"
+    if len(bytes(kid)) == 0 or len(bytes(kid)) > 128:
+        raise "KeySelectionError: kid is empty or too long"
+    for key in keys.keys:
+        if key.kid == kid:
+            if key.algorithm != algorithm:
+                raise "AlgorithmError: selected key algorithm does not match token"
+            if not key.can_verify:
+                raise "KeySelectionError: selected key does not permit verification"
+            return key
+    raise "KeySelectionError: unknown kid"
+
+def verify_keyset_signature(
+    str token,
+    KeySet keys,
+    list[str] algorithms,
+) -> VerifiedToken:
+    auto key = _select_key(token, keys, algorithms)
+    return verify_signature(token, key.material, key.algorithm)
+
+def decode_keyset_at(
+    str token,
+    KeySet keys,
+    list[str] algorithms,
+    float64 now,
+    Policy policy = Policy(),
+) -> dict[str, JsonValue]:
+    auto verified = verify_keyset_signature(token, keys, algorithms)
+    return _verified_claims(verified, policy, now)
+
+def decode_keyset(
+    str token,
+    KeySet keys,
+    list[str] algorithms,
+    Policy policy = Policy(),
+) -> dict[str, JsonValue]:
+    auto verified = verify_keyset_signature(token, keys, algorithms)
     return _verified_claims(verified, policy, time.time())
