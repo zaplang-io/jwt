@@ -2,7 +2,7 @@
 
 Pure-Zap JWT creation and verification over stdlib crypto.
 Implements [zaplang-io/zap#318](https://github.com/zaplang-io/zap/issues/318).
-Development status: compact HMAC signing and authenticated claims validation.
+Development status: compact HMAC signing, authenticated claims, and offline JWK rotation.
 
 ```zap
 import jwt
@@ -95,14 +95,89 @@ does not claim one. Generated-code auditing/core primitive work is tracked in
 [#5](https://github.com/zaplang-io/jwt/issues/5).
 
 Failures raise catchable messages prefixed with `TokenError:`, `AlgorithmError:`,
-`HeaderError:`, `KeyError:`, `SignatureError:`, `ClaimsError:`, or `PolicyError:`. Treat every failure as rejection;
+`HeaderError:`, `KeyError:`, `SignatureError:`, `ClaimsError:`, `PolicyError:`,
+`JWKError:`, or `KeySelectionError:`. Treat every failure as rejection;
 do not depend on full message text. Signature authentication precedes payload JSON
 parsing. Invalid input may fail at the first applicable check.
 
 Supported now: compact JWS with HS256 and HS512. Unsupported: HS384, asymmetric
 algorithms, `none`, JWE, detached/unencoded payloads, network JWKS and automatic
-key discovery. Asymmetric algorithms require core crypto support and remain
+key discovery. Trusted offline oct JWK/JWKS is supported below. Asymmetric algorithms require core crypto support and remain
 tracked explicitly; HMAC support does not imply RSA/EC/Ed25519 support.
+
+For trusted offline key configuration, `load_jwk(json_text) -> Key` and
+`load_jwks(json_text) -> KeySet` validate oct JWKs. An oct JWK contains the shared
+secret: keep these documents private, rather than publishing them as a public
+JWKS endpoint. Load explicitly trusted configuration; token headers never supply
+key documents or locations.
+
+This profile requires nonempty `kid`, explicit `alg` (`HS256` or `HS512`),
+`kty="oct"`, and canonical unpadded base64url `k`. HMAC minimum key sizes remain
+32/64 bytes. Optional `use` must be `sig`; optional `key_ops` must be a nonempty
+array of unique `sign` and/or `verify` values. Absent `key_ops` permits both;
+present operations are enforced by the key-based APIs. Unsupported key types,
+algorithms, certificate/reference fields and critical extensions are rejected.
+Unknown other metadata is ignored. Duplicate JSON members at any depth fail.
+
+`Key` exposes `kid`, `algorithm`, `material` (raw bytes), `can_sign`, and
+`can_verify`; `KeySet` holds `keys`. These are trusted, mutable configuration
+objects, not opaque secret vaults. Key-set operations revalidate configuration
+on each use, including directly constructed or mutated sets. IDs must be unique,
+and identical material cannot be bound to different algorithms within one set.
+Limits are 64 keys, 128 UTF-8 bytes per ID, 8,192 raw bytes per key, and 1 MiB per
+loaded JSON document; the existing 32-level JSON nesting limit also applies.
+An empty set is invalid. Replacing a whole loaded set makes rotation explicit.
+
+`encode_key(claims, key, headers={})` checks signing permission, supplies `kid`
+and the bound algorithm, and rejects conflicting supplied headers.
+`verify_keyset_signature(token, keys, algorithms)` selects one key and returns
+`VerifiedToken` after signature authentication, without claims validation.
+`decode_keyset(token, keys, algorithms, policy=Policy())` and
+`decode_keyset_at(token, keys, algorithms, now, policy=Policy())` apply the same
+claims policy as their single-key counterparts. The caller must supply a
+nonempty unique allowlist of supported algorithms; a token cannot widen it.
+
+Selection requires exactly one configured `kid`, the key's bound algorithm must
+match both the token and the caller's allowlist, and the key must permit verify.
+Missing/empty/unknown IDs or verification-disallowed keys raise
+`KeySelectionError`. Malformed key documents/configurations raise `JWKError`;
+algorithm policy violations raise `AlgorithmError`. A malformed header retains
+its existing error category. Failure never falls back to another key, fetches a
+URL, reads a path from `kid`, or updates a hidden cache. All selected signatures
+and claims still pass through the existing verification functions.
+
+A rotation overlap can accept the old and new keys while the issuer signs with
+the new key. Remove the old key after the intended overlap window:
+
+```zap
+import jwt
+
+def jwk_json(str kid, bytes material) -> str:
+    return json.dumps(JsonValue.Object({"kty": JsonValue.Str("oct"), "alg": JsonValue.Str("HS256"), "kid": JsonValue.Str(kid), "k": JsonValue.Str(base64.urlsafe_encode_nopad(material))}))
+
+def main():
+    auto old_json = jwk_json("old", crypto.random_bytes(32))
+    auto new_json = jwk_json("new", crypto.random_bytes(32))
+    auto old_key = jwt.load_jwk(old_json)
+    auto new_key = jwt.load_jwk(new_json)
+    auto claims = {"exp": JsonValue.Int(200), "iss": JsonValue.Str("issuer"), "aud": JsonValue.Str("api")}
+    auto old_token = jwt.encode_key(claims, old_key)
+    auto new_token = jwt.encode_key(claims, new_key)
+    auto overlap = jwt.load_jwks("{\"keys\":[" + old_json + "," + new_json + "]}")
+    auto policy = jwt.Policy(expected={"iss": "issuer"}, audiences=["api"])
+    jwt.decode_keyset_at(old_token, overlap, ["HS256"], 100.0, policy)
+    jwt.decode_keyset_at(new_token, overlap, ["HS256"], 100.0, policy)
+    auto retired = jwt.load_jwks("{\"keys\":[" + new_json + "]}")
+    jwt.decode_keyset_at(new_token, retired, ["HS256"], 100.0, policy)
+    # old_token now fails KeySelectionError with the retired set.
+```
+
+The fixed time/expiration in this rotation example is for deterministic checking;
+use real expiration and `decode_keyset` in an application. Independent oct JWK
+fixtures are reproduced with `python3 tools/generate-jwk-vectors.py`, followed by
+`zap fmt tests`. Their HMAC signatures and base64url key values are generated
+with Python stdlib, not the Zap implementation. See [JWK](https://www.rfc-editor.org/rfc/rfc7517)
+and [symmetric key parameters](https://www.rfc-editor.org/rfc/rfc7518#section-6.4).
 
 Build sequence (each is an agent-sized M issue including tests and docs):
 
