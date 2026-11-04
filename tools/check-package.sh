@@ -25,6 +25,10 @@ def main():
     auto token = jwt.encode({"sub": JsonValue.Str("consumer")}, key, "HS256")
     auto verified = jwt.verify_signature(token, key, "HS256")
     assert json.dumps(verified.claims["sub"]) == "\"consumer\""
+    auto policy = jwt.Policy(expected={"iss": "issuer"}, audiences=["api"], required=["exp", "sub"])
+    auto signed = jwt.encode({"iss": JsonValue.Str("issuer"), "sub": JsonValue.Str("consumer"), "aud": JsonValue.Str("api"), "exp": JsonValue.Int(200)}, key, "HS256")
+    auto claims = jwt.decode_at(signed, key, "HS256", 100.0, policy)
+    assert json.dumps(claims["sub"]) == "\"consumer\""
     print("isolated package consumer: PASS")
 ZAP
 (cd "$build" && "$zap" zenv create --no-venv && ZAP_ZENV="$build/zenv" "$zap" run src/main.zap)

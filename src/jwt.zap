@@ -1,4 +1,4 @@
-# Compact signed JWTs. Claim validation is deliberately a separate API/slice.
+# Compact signed JWTs with authenticated claim validation and explicit policy.
 import math
 struct VerifiedToken:
     dict[str, JsonValue] header
@@ -191,3 +191,148 @@ def verify_signature(str token, bytes key, str algorithm) -> VerifiedToken:
     auto claims = _json_object(payload_raw)
     _check_value(JsonValue.Object(claims))
     return VerifiedToken(header, claims)
+
+# Trusted application configuration. Registered claims are always checked when
+# present; `required` controls which claims must also be present and non-null.
+struct Policy:
+    dict[str, str] expected = {}
+    list[str] audiences = []
+    list[str] required = ["exp"]
+    str token_type = "JWT"
+    float64 leeway = 0.0
+
+def _policy(Policy policy):
+    if math.isnan(policy.leeway) or math.isinf(policy.leeway):
+        raise "PolicyError: leeway must be finite"
+    if policy.leeway < 0.0 or policy.leeway > 86400.0:
+        raise "PolicyError: leeway must be between 0 and 86400 seconds"
+    if len(policy.token_type) == 0:
+        raise "PolicyError: an expected token type is required"
+    for name in policy.required:
+        if len(name) == 0:
+            raise "PolicyError: required claim names must be nonempty"
+    for audience in policy.audiences:
+        if len(audience) == 0:
+            raise "PolicyError: expected audiences must be nonempty"
+    for name in policy.expected:
+        if name != "iss" and name != "sub" and name != "jti":
+            raise "PolicyError: expected only accepts iss, sub and jti"
+
+def _finite_date(float64 value) -> bool:
+    # Every supported integer date is exactly representable as binary64. Compare
+    # dates before subtracting them, rather than adding leeway to large dates.
+    return not math.isnan(value) and not math.isinf(value) and value >= -9007199254740991.0 and value <= 9007199254740991.0
+
+def _date(JsonValue value, str name) -> float64:
+    match value:
+        case JsonValue.Int(i):
+            if i < -9007199254740991 or i > 9007199254740991:
+                raise "ClaimsError: " + name + " exceeds the supported NumericDate range"
+            return float64(i)
+        case JsonValue.Float(f):
+            if not _finite_date(f):
+                raise "ClaimsError: " + name + " must be a finite supported NumericDate"
+            return f
+        case _:
+            raise "ClaimsError: " + name + " must be a numeric date"
+
+def _claim_string(JsonValue value, str name) -> str:
+    match value:
+        case JsonValue.Str(s):
+            return s
+        case _:
+            raise "ClaimsError: " + name + " must be a string"
+
+def _audiences(JsonValue value) -> list[str]:
+    list[str] out = []
+    match value:
+        case JsonValue.Str(s):
+            if len(s) == 0:
+                raise "ClaimsError: aud must not be empty"
+            out.append(s)
+        case JsonValue.Array(items):
+            if len(items) == 0:
+                raise "ClaimsError: aud must not be empty"
+            for item in items:
+                auto s = _claim_string(item, "aud entry")
+                if len(s) == 0:
+                    raise "ClaimsError: aud entries must not be empty"
+                out.append(s)
+        case _:
+            raise "ClaimsError: aud must be a string or string array"
+    return out
+
+def _verified_claims(
+    VerifiedToken token,
+    Policy policy,
+    float64 now,
+) -> dict[str, JsonValue]:
+    _policy(policy)
+    if not _finite_date(now):
+        raise "PolicyError: clock must return a finite supported NumericDate"
+    if not "typ" in token.header:
+        raise "ClaimsError: missing token type"
+    if _claim_string(token.header["typ"], "typ") != policy.token_type:
+        raise "ClaimsError: token type mismatch"
+    auto claims = token.claims
+    for name in policy.required:
+        if not name in claims:
+            raise "ClaimsError: missing required claim " + name
+        match claims[name]:
+            case JsonValue.Null:
+                raise "ClaimsError: required claim is null: " + name
+            case _:
+                auto ignored = 0
+    for name in ["iss", "sub", "jti"]:
+        if name in claims:
+            _claim_string(claims[name], name)
+    for name in policy.expected:
+        if not name in claims:
+            raise "ClaimsError: missing expected claim " + name
+        if _claim_string(claims[name], name) != policy.expected[name]:
+            raise "ClaimsError: " + name + " mismatch"
+    if "aud" in claims:
+        auto actual = _audiences(claims["aud"])
+        if len(policy.audiences) == 0:
+            raise "ClaimsError: aud requires an expected audience"
+        auto matched = False
+        for candidate in actual:
+            for expected in policy.audiences:
+                if candidate == expected:
+                    matched = True
+        if not matched:
+            raise "ClaimsError: audience mismatch"
+    else:
+        if len(policy.audiences) > 0:
+            raise "ClaimsError: missing audience"
+    if "exp" in claims:
+        auto expires = _date(claims["exp"], "exp")
+        if now >= expires:
+            if now - expires >= policy.leeway:
+                raise "ClaimsError: token expired"
+    for name in ["nbf", "iat"]:
+        if name in claims:
+            auto date = _date(claims[name], name)
+            if date > now:
+                if date - now > policy.leeway:
+                    raise "ClaimsError: " + name + " is in the future"
+    return claims
+
+def decode_at(
+    str token,
+    bytes key,
+    str algorithm,
+    float64 now,
+    Policy policy = Policy(),
+) -> dict[str, JsonValue]:
+    auto verified = verify_signature(token, key, algorithm)
+    return _verified_claims(verified, policy, now)
+
+def decode(
+    str token,
+    bytes key,
+    str algorithm,
+    Policy policy = Policy(),
+) -> dict[str, JsonValue]:
+    auto verified = verify_signature(token, key, algorithm)
+    return _verified_claims(verified, policy, time.time())
