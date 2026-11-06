@@ -20,8 +20,8 @@ def main():
             assert b
         case _:
             assert False
-    # A single flipped signature character must fail authentication.
-    auto tampered = header + "." + payload + ".dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXl"
+    # A valid-length, canonical but wrong signature must fail authentication.
+    auto tampered = header + "." + payload + ".AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     auto caught = False
     try:
         jwt.verify_signature(tampered, key, "HS256")
