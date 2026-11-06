@@ -2,7 +2,8 @@
 
 Pure-Zap JWT creation and verification over stdlib crypto.
 Implements [zaplang-io/zap#318](https://github.com/zaplang-io/zap/issues/318).
-Development status: compact HMAC signing, authenticated claims, and offline JWK rotation.
+Development status: compact HMAC and asymmetric (RS256/ES256/EdDSA) signing,
+authenticated claims, and offline symmetric and public-key JWK rotation.
 
 ```zap
 import jwt
@@ -16,9 +17,11 @@ def main():
     print(json.dumps(claims["sub"]))
 ```
 
-`encode(claims, key, algorithm, headers={}) -> str` signs a JSON object using
-HS256 or HS512. Keys are raw `bytes`, with a minimum length of 32 or 64 bytes
-respectively. Generate random keys; a long password does not guarantee entropy.
+`encode(claims, key, algorithm, headers={}) -> str` signs a JSON object. For
+HS256/HS512 the `key` is the raw secret `bytes`, with a minimum length of 32 or
+64 bytes respectively; generate random keys, since a long password does not
+guarantee entropy. For RS256/ES256/EdDSA the `key` is the **private** key as
+PEM or DER `bytes` (see the asymmetric section below).
 Optional headers are copied, and cannot override the selected algorithm.
 `typ` defaults to `JWT`; `kid`, `typ`, and `cty` must be strings when present.
 
@@ -38,6 +41,48 @@ policy before returning claims. `decode_at(token, key, algorithm, now,
 policy=Policy())` accepts trusted Unix seconds for a deterministic/injected
 clock. `decode` samples the wall clock once after signature verification.
 A bad signature takes precedence over claim, clock, and policy errors.
+
+## Asymmetric algorithms
+
+The same `encode`, `verify_signature`, `decode`, and key-set functions accept the
+asymmetric algorithms. Signing with `encode`/`encode_key` always requires the
+**private** key; verification with `verify_signature`/`decode`/`decode_keyset`
+always requires the **public** key. Passing a public key to sign, or a private
+key to verify, raises `KeyError` — the roles never silently cross.
+
+| `alg` | JOSE scheme | Key family | Signature encoding |
+| --- | --- | --- | --- |
+| `HS256` | HMAC-SHA-256 | shared `oct` secret (≥ 32 bytes) | 32-byte MAC |
+| `HS512` | HMAC-SHA-512 | shared `oct` secret (≥ 64 bytes) | 64-byte MAC |
+| `RS256` | RSASSA-PKCS1-v1_5 + SHA-256 | RSA, 2048–8192-bit modulus | modulus-width signature |
+| `ES256` | ECDSA P-256 + SHA-256 | EC, curve `P-256` | fixed 64-byte JOSE `r‖s` |
+| `EdDSA` | Ed25519 (RFC 8037) | OKP, curve `Ed25519` | 64-byte signature |
+
+Asymmetric keys are supplied as PEM (`BEGIN PUBLIC KEY`/`BEGIN PRIVATE KEY`,
+and PKCS#1 `BEGIN RSA PRIVATE KEY`) or DER `bytes`. Every key is inspected before
+use: the family must match the algorithm, an `ES256` key must be on `P-256`, and
+an `RS256` modulus must be 2048–8192 bits. `ES256` only ever accepts and emits the
+fixed-width 64-byte JOSE `r‖s` form — ASN.1/DER ECDSA signatures are rejected.
+Unparseable, encrypted, or unsupported keys raise `KeyError`.
+
+`ES256` is non-deterministic (random ECDSA nonce), so an identical payload yields
+a different signature each time; it is still verifiable by any conformant party.
+`RS256` and `EdDSA` are deterministic.
+
+```zap
+import jwt
+
+def main(bytes private_pem, bytes public_pem):
+    # Key bytes come from trusted configuration, never from the token.
+    auto token = jwt.encode({"sub": JsonValue.Str("alice"), "exp": JsonValue.Int(int64(time.time()) + 300)}, private_pem, "RS256")
+    auto verified = jwt.verify_signature(token, public_pem, "RS256")
+    print(json.dumps(verified.claims["sub"]))
+```
+
+The classic "algorithm confusion" attack is prevented because the verifier always
+pins the algorithm from trusted configuration: a token's `alg` header can never
+select HMAC verification against an RSA/EC public key, nor widen a key set's
+allowlist.
 
 `Policy` fields:
 
@@ -86,7 +131,8 @@ read files or cause network requests. Unknown noncritical header fields are
 preserved but carry no trust or policy meaning.
 
 Limits: 50,000 compact token bytes; 4,096 decoded header bytes; 32,768 decoded
-payload bytes; 32 JSON container levels; 86 encoded signature characters. Signing
+payload bytes; 32 JSON container levels; 1,366 encoded signature characters (an
+8192-bit RSA signature; HMAC/ES256/EdDSA signatures are 86). Signing
 uses the same JSON limits. Short/wrong signatures fail authentication. Signature
 comparison accumulates XOR differences over the entire fixed-length digest with
 no data-dependent early return in Zap source. The current compiler/stdlib does
@@ -100,24 +146,37 @@ Failures raise catchable messages prefixed with `TokenError:`, `AlgorithmError:`
 do not depend on full message text. Signature authentication precedes payload JSON
 parsing. Invalid input may fail at the first applicable check.
 
-Supported now: compact JWS with HS256 and HS512. Unsupported: HS384, asymmetric
-algorithms, `none`, JWE, detached/unencoded payloads, network JWKS and automatic
-key discovery. Trusted offline oct JWK/JWKS is supported below. Asymmetric algorithms require core crypto support and remain
-tracked explicitly; HMAC support does not imply RSA/EC/Ed25519 support.
+Supported now: compact JWS with HS256, HS512, RS256, ES256, and EdDSA.
+Unsupported: HS384, RS384/RS512, ES384/ES512, PS256/PS384/PS512, `none`, JWE,
+detached/unencoded payloads, network JWKS and automatic key discovery. Trusted
+offline `oct`, `RSA`, `EC`, and `OKP` JWK/JWKS is supported below.
 
 For trusted offline key configuration, `load_jwk(json_text) -> Key` and
-`load_jwks(json_text) -> KeySet` validate oct JWKs. An oct JWK contains the shared
-secret: keep these documents private, rather than publishing them as a public
-JWKS endpoint. Load explicitly trusted configuration; token headers never supply
-key documents or locations.
+`load_jwks(json_text) -> KeySet` validate `oct`, `RSA`, `EC`, and `OKP` JWKs.
+An `oct` JWK contains the shared secret: keep those documents private, rather than
+publishing them as a public JWKS endpoint. `RSA`, `EC`, and `OKP` JWKs are
+**public** verification keys and may be published. Load explicitly trusted
+configuration; token headers never supply key documents or locations.
 
-This profile requires nonempty `kid`, explicit `alg` (`HS256` or `HS512`),
-`kty="oct"`, and canonical unpadded base64url `k`. HMAC minimum key sizes remain
-32/64 bytes. Optional `use` must be `sig`; optional `key_ops` must be a nonempty
-array of unique `sign` and/or `verify` values. Absent `key_ops` permits both;
+Every JWK requires a nonempty `kid` and explicit `alg`. By key type:
+
+- `oct` (`alg` `HS256`/`HS512`): canonical unpadded base64url `k`; HMAC minimum
+  key sizes remain 32/64 bytes. Permits sign and verify.
+- `RSA` (`alg` `RS256`): public components `n` and `e`; the modulus must be
+  2048–8192 bits. Private members (`d`, `p`, `q`, `dp`, `dq`, `qi`, `oth`) are
+  rejected.
+- `EC` (`alg` `ES256`): `crv="P-256"` and public coordinates `x`, `y`, validated
+  to lie on the curve. A private `d` member is rejected.
+- `OKP` (`alg` `EdDSA`): `crv="Ed25519"` and public key `x`. A private `d` member
+  is rejected.
+
+`RSA`/`EC`/`OKP` keys are verification-only, so `key_ops` may not request `sign`.
+Optional `use` must be `sig`; optional `key_ops` must be a nonempty array of
+unique `sign` and/or `verify` values. Absent `key_ops` permits verification;
 present operations are enforced by the key-based APIs. Unsupported key types,
-algorithms, certificate/reference fields and critical extensions are rejected.
-Unknown other metadata is ignored. Duplicate JSON members at any depth fail.
+algorithms, curves, certificate/reference fields and critical extensions are
+rejected. Unknown other metadata is ignored. Duplicate JSON members at any depth
+fail. `encode_key` signs only with an `oct` key; public keys cannot sign.
 
 `Key` exposes `kid`, `algorithm`, `material` (raw bytes), `can_sign`, and
 `can_verify`; `KeySet` holds `keys`. These are trusted, mutable configuration
@@ -189,10 +248,14 @@ Build sequence (each is an agent-sized M issue including tests and docs):
 
 Run `sh tools/run-tests.sh` with a codegen-enabled `zap` on PATH (or set `ZAP`).
 `--check` checks the frontend only. `sh tools/check-package.sh` checks packaging
-and runs an isolated consumer. CI pins the published Zap compiler image. Test
-vectors are independently generated with Python stdlib HMAC/SHA-2; reproduce with
-`python3 tools/generate-vectors.py` followed by `zap fmt tests`. Python is only a
-fixture authoring tool, not a runtime dependency.
+and runs an isolated consumer. CI pins the published Zap compiler image by digest.
+HMAC test vectors are independently generated with Python stdlib HMAC/SHA-2;
+reproduce with `python3 tools/generate-vectors.py` followed by `zap fmt tests`.
+Asymmetric interop and binding vectors are generated from fixed test keys in
+`tools/asym-fixtures/` using the OpenSSL CLI as the independent signer; reproduce
+with `python3 tools/generate-asym-vectors.py` followed by `zap fmt tests` (RS256
+and EdDSA reproduce byte-for-byte; ES256 uses a random nonce). Python and OpenSSL
+are only fixture-authoring tools, not runtime dependencies.
 
 References: [JWS](https://www.rfc-editor.org/rfc/rfc7515),
 [JWA](https://www.rfc-editor.org/rfc/rfc7518),

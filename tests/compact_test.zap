@@ -101,7 +101,8 @@ def main():
     auto huge_payload = "{\"x\":\"" + huge + "\"}"
     bad(signed(header, huge_payload, key), key, "TokenError")
     bad_encode({}, b"", "KeyError")
-    bad_encode({}, key, "AlgorithmError", "RS256")
+    # RS256/ES256/EdDSA are supported now; an unsupported identifier still fails.
+    bad_encode({}, key, "AlgorithmError", "RS384")
     bad_encode({"alg": JsonValue.Str("none")}, key, "AlgorithmError")
     bad_encode({"jku": JsonValue.Str("https://attacker.invalid")}, key, "HeaderError")
     auto headers = {"kid": JsonValue.Str("key-1")}

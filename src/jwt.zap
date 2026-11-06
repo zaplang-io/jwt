@@ -15,6 +15,58 @@ def _key(bytes key, str algorithm):
     if len(key) < _signature_size(algorithm):
         raise "KeyError: HMAC key is shorter than the digest size"
 
+# Map a JOSE algorithm identifier to its key family. The asymmetric families use
+# the same spelling as crypto.key_info().kind so binding is a direct comparison.
+def _algorithm_family(str algorithm) -> str:
+    if algorithm == "HS256" or algorithm == "HS512":
+        return "HMAC"
+    if algorithm == "RS256":
+        return "RSA"
+    if algorithm == "ES256":
+        return "EC"
+    if algorithm == "EdDSA":
+        return "Ed25519"
+    raise "AlgorithmError: supported algorithms are HS256, HS512, RS256, ES256 and EdDSA"
+
+def _is_hmac(str algorithm) -> bool:
+    return algorithm == "HS256" or algorithm == "HS512"
+
+def _require_algorithm(str algorithm):
+    # Reject any unsupported identifier before it reaches a signing primitive.
+    auto family = _algorithm_family(algorithm)
+    if len(family) == 0:
+        raise "AlgorithmError: unsupported algorithm"
+
+def _key_info_or_raise(bytes key) -> KeyInfo:
+    # A single, uniform rejection for unparseable/unsupported/encrypted keys so
+    # callers never branch on the stdlib's lower-level ValueError text.
+    try:
+        return crypto.key_info(key)
+    except Exception:
+        raise "KeyError: unsupported or malformed asymmetric key"
+
+# Enforce key family, size, curve, and the private/public role an operation
+# needs. Signing requires a private key; verification requires a public key.
+def _check_asym_key(bytes key, str algorithm, bool want_private):
+    auto family = _algorithm_family(algorithm)
+    if family == "HMAC":
+        raise "AlgorithmError: HMAC keys are not asymmetric"
+    auto info = _key_info_or_raise(key)
+    if info.kind != family:
+        raise "KeyError: " + algorithm + " requires a " + family + " key"
+    if family == "RSA":
+        if info.bits < 2048:
+            raise "KeyError: RS256 requires an RSA key of at least 2048 bits"
+        if info.bits > 8192:
+            raise "KeyError: RS256 rejects RSA keys larger than 8192 bits"
+    if family == "EC":
+        if info.curve != "P-256":
+            raise "KeyError: ES256 requires the P-256 curve"
+    if want_private and not info.is_private:
+        raise "KeyError: signing requires a private key"
+    if not want_private and info.is_private:
+        raise "KeyError: verification requires a public key, not a private key"
+
 def _decode_segment(str segment) -> bytes:
     if len(segment) == 0 or len(segment) % 4 == 1:
         raise "TokenError: invalid base64url length"
@@ -109,11 +161,32 @@ def _header(dict[str, JsonValue] header, str algorithm):
                 case _:
                     raise "HeaderError: " + name + " must be a string"
 
-def _mac(bytes key, str message, str algorithm) -> bytes:
+def _sign(bytes key, str message, str algorithm) -> bytes:
     if algorithm == "HS256":
         return crypto.hmac_sha256_raw(key, message)
-    # Stdlib HS512 currently returns hex; decode once to the raw JWS signature.
-    return hex.decode(crypto.hmac_sha512(key, message))
+    if algorithm == "HS512":
+        # Stdlib HS512 currently returns hex; decode once to the raw JWS signature.
+        return hex.decode(crypto.hmac_sha512(key, message))
+    if algorithm == "RS256":
+        return crypto.rsa_sha256_sign(key, message)
+    if algorithm == "ES256":
+        # Fixed-width 64-byte JOSE r||s; the stdlib never exposes DER.
+        return crypto.p256_sha256_sign(key, message)
+    if algorithm == "EdDSA":
+        return crypto.ed25519_sign(key, message)
+    raise "AlgorithmError: supported algorithms are HS256, HS512, RS256, ES256 and EdDSA"
+
+def _verify_sig(bytes key, str message, bytes signature, str algorithm) -> bool:
+    if algorithm == "HS256" or algorithm == "HS512":
+        return _same_signature(_sign(key, message, algorithm), signature)
+    if algorithm == "RS256":
+        return crypto.rsa_sha256_verify(key, message, signature)
+    if algorithm == "ES256":
+        # Rejects any signature that is not canonical 64-byte JOSE r||s.
+        return crypto.p256_sha256_verify(key, message, signature)
+    if algorithm == "EdDSA":
+        return crypto.ed25519_verify(key, message, signature)
+    return False
 
 def _same_signature(bytes expected, bytes actual) -> bool:
     if len(expected) != len(actual):
@@ -147,7 +220,11 @@ def encode(
     str algorithm,
     dict[str, JsonValue] headers = {},
 ) -> str:
-    _key(key, algorithm)
+    if _is_hmac(algorithm):
+        _key(key, algorithm)
+    else:
+        # Asymmetric signing requires the matching private key of the right family.
+        _check_asym_key(key, algorithm, True)
     # Copy supplied headers rather than modifying a caller's reusable map.
     dict[str, JsonValue] header = {
         "alg": JsonValue.Str(algorithm),
@@ -166,7 +243,7 @@ def encode(
     _json_object(bytes(header_text))
     _json_object(bytes(payload_text))
     auto message = base64.urlsafe_encode_nopad(header_text) + "." + base64.urlsafe_encode_nopad(payload_text)
-    return message + "." + base64.urlsafe_encode_nopad(_mac(key, message, algorithm))
+    return message + "." + base64.urlsafe_encode_nopad(_sign(key, message, algorithm))
 
 def _compact_parts(str token) -> list[str]:
     if len(bytes(token)) > 50000:
@@ -176,20 +253,26 @@ def _compact_parts(str token) -> list[str]:
         raise "TokenError: expected three compact segments"
     if len(parts[0]) > 5462 or len(parts[1]) > 43691:
         raise "TokenError: encoded JSON size limit exceeded"
-    if len(parts[2]) > 86:
+    # 86 base64url chars hold a 64-byte HMAC/ES256/EdDSA signature; RSA signatures
+    # scale with the modulus, so cap at an 8192-bit RSA signature (1366 chars).
+    if len(parts[2]) > 1366:
         raise "TokenError: signature size limit exceeded"
     return parts
 
 def verify_signature(str token, bytes key, str algorithm) -> VerifiedToken:
     # Only authenticates the signature. It does not validate exp/iss/aud/etc.
-    _key(key, algorithm)
+    if _is_hmac(algorithm):
+        _key(key, algorithm)
+    else:
+        # Verification uses the public key only; a private key is rejected.
+        _check_asym_key(key, algorithm, False)
     auto parts = _compact_parts(token)
     auto header_raw = _decode_segment(parts[0])
     auto signature = _decode_segment(parts[2])
     auto header = _json_object(header_raw)
     _header(header, algorithm)
     auto message = parts[0] + "." + parts[1]
-    if not _same_signature(_mac(key, message, algorithm), signature):
+    if not _verify_sig(key, message, signature, algorithm):
         raise "SignatureError: invalid signature"
     auto payload_raw = _decode_segment(parts[1])
     auto claims = _json_object(payload_raw)
@@ -367,13 +450,88 @@ def _key_record(Key key):
     if len(key.material) > 8192:
         raise "JWKError: key material exceeds 8192 bytes"
     try:
-        _key(key.material, key.algorithm)
+        if _is_hmac(key.algorithm):
+            _key(key.material, key.algorithm)
+        else:
+            # Key-set entries are public verification keys; reject private keys.
+            _check_asym_key(key.material, key.algorithm, False)
     except Exception:
         raise "JWKError: unsupported algorithm or insufficient key material"
     if not key.can_sign and not key.can_verify:
         raise "JWKError: key must permit sign or verify"
 
+# Shared non-secret JWK metadata: identifier, bound algorithm and operations.
+struct _JwkMeta:
+    str kid
+    str algorithm
+    bool can_sign
+    bool can_verify
+
+# Parse the members common to every supported key type and reject certificate,
+# reference and critical-extension fields that this trusted-offline profile omits.
+def _jwk_meta(dict[str, JsonValue] fields) -> _JwkMeta:
+    auto kid = _jwk_string(fields, "kid")
+    auto algorithm = _jwk_string(fields, "alg")
+    for name in ["x5u", "x5c", "x5t", "x5t#S256", "jku", "jwk", "crit", "b64"]:
+        if name in fields:
+            raise "JWKError: unsupported key reference or extension"
+    if "use" in fields:
+        if _jwk_string(fields, "use") != "sig":
+            raise "JWKError: key use must be sig"
+    auto can_sign = True
+    auto can_verify = True
+    if "key_ops" in fields:
+        can_sign = False
+        can_verify = False
+        dict[str, bool] seen = {}
+        match fields["key_ops"]:
+            case JsonValue.Array(operations):
+                if len(operations) == 0:
+                    raise "JWKError: key_ops must not be empty"
+                for operation in operations:
+                    auto name = ""
+                    match operation:
+                        case JsonValue.Str(s):
+                            name = s
+                        case _:
+                            raise "JWKError: key_ops entries must be strings"
+                    if name in seen:
+                        raise "JWKError: duplicate key operation"
+                    seen[name] = True
+                    if name == "sign":
+                        can_sign = True
+                    elif name == "verify":
+                        can_verify = True
+                    else:
+                        raise "JWKError: key_ops only supports sign and verify"
+            case _:
+                raise "JWKError: key_ops must be an array"
+    return _JwkMeta(kid, algorithm, can_sign, can_verify)
+
+# Decode a required fixed base64url integer/octet component (RSA n/e, EC x/y,
+# OKP x). The canonical unpadded base64url rule matches the compact profile.
+def _jwk_component(dict[str, JsonValue] fields, str name) -> bytes:
+    auto encoded = _jwk_string(fields, name)
+    if len(encoded) == 0:
+        raise "JWKError: key component must not be empty: " + name
+    if len(encoded) > 10923:
+        raise "JWKError: key component exceeds its limit: " + name
+    try:
+        return _decode_segment(encoded)
+    except Exception:
+        raise "JWKError: key component must be canonical unpadded base64url: " + name
+
 def _parse_jwk(dict[str, JsonValue] fields) -> Key:
+    auto kty = _jwk_string(fields, "kty")
+    if kty == "RSA":
+        return _parse_rsa_jwk(fields)
+    if kty == "EC":
+        return _parse_ec_jwk(fields)
+    if kty == "OKP":
+        return _parse_okp_jwk(fields)
+    return _parse_oct_jwk(fields)
+
+def _parse_oct_jwk(dict[str, JsonValue] fields) -> Key:
     if _jwk_string(fields, "kty") != "oct":
         raise "JWKError: only oct keys are supported"
     auto kid = _jwk_string(fields, "kid")
@@ -423,6 +581,65 @@ def _parse_jwk(dict[str, JsonValue] fields) -> Key:
     auto key = Key(kid, algorithm, material, can_sign, can_verify)
     _key_record(key)
     return key
+
+# Reject the private-key members so a key set can only ever hold public keys.
+def _reject_private_members(dict[str, JsonValue] fields, list[str] members):
+    for name in members:
+        if name in fields:
+            raise "JWKError: only public keys are supported"
+
+def _public_jwk_key(_JwkMeta meta, dict[str, JsonValue] fields, bytes material) -> Key:
+    # Public keys can only verify; an explicit sign operation is contradictory.
+    if "key_ops" in fields and meta.can_sign:
+        raise "JWKError: public keys cannot sign"
+    auto key = Key(meta.kid, meta.algorithm, material, False, meta.can_verify)
+    _key_record(key)
+    return key
+
+def _parse_rsa_jwk(dict[str, JsonValue] fields) -> Key:
+    auto meta = _jwk_meta(fields)
+    if meta.algorithm != "RS256":
+        raise "JWKError: RSA keys require the RS256 algorithm"
+    _reject_private_members(fields, ["d", "p", "q", "dp", "dq", "qi", "oth"])
+    auto n_bytes = _jwk_component(fields, "n")
+    auto e_bytes = _jwk_component(fields, "e")
+    auto material = b""
+    try:
+        material = crypto.rsa_public_key_pem(n_bytes, e_bytes)
+    except Exception:
+        raise "JWKError: invalid RSA public key parameters"
+    return _public_jwk_key(meta, fields, material)
+
+def _parse_ec_jwk(dict[str, JsonValue] fields) -> Key:
+    auto meta = _jwk_meta(fields)
+    if meta.algorithm != "ES256":
+        raise "JWKError: EC keys require the ES256 algorithm"
+    if _jwk_string(fields, "crv") != "P-256":
+        raise "JWKError: ES256 requires the P-256 curve"
+    _reject_private_members(fields, ["d"])
+    auto x_bytes = _jwk_component(fields, "x")
+    auto y_bytes = _jwk_component(fields, "y")
+    auto material = b""
+    try:
+        material = crypto.p256_public_key_pem(x_bytes, y_bytes)
+    except Exception:
+        raise "JWKError: invalid EC public key parameters"
+    return _public_jwk_key(meta, fields, material)
+
+def _parse_okp_jwk(dict[str, JsonValue] fields) -> Key:
+    auto meta = _jwk_meta(fields)
+    if meta.algorithm != "EdDSA":
+        raise "JWKError: OKP keys require the EdDSA algorithm"
+    if _jwk_string(fields, "crv") != "Ed25519":
+        raise "JWKError: EdDSA requires the Ed25519 curve"
+    _reject_private_members(fields, ["d"])
+    auto x_bytes = _jwk_component(fields, "x")
+    auto material = b""
+    try:
+        material = crypto.ed25519_public_key_pem(x_bytes)
+    except Exception:
+        raise "JWKError: invalid OKP public key parameters"
+    return _public_jwk_key(meta, fields, material)
 
 def _jwk_document(str source) -> dict[str, JsonValue]:
     if len(bytes(source)) > 1048576:
@@ -493,11 +710,11 @@ def encode_key(
     return encode(claims, key.material, key.algorithm, copied)
 
 def _allowed_algorithms(list[str] algorithms):
-    if len(algorithms) == 0 or len(algorithms) > 2:
-        raise "AlgorithmError: supply 1 or 2 supported algorithms"
+    if len(algorithms) == 0 or len(algorithms) > 5:
+        raise "AlgorithmError: supply 1 through 5 supported algorithms"
     dict[str, bool] seen = {}
     for algorithm in algorithms:
-        _signature_size(algorithm)
+        _require_algorithm(algorithm)
         if algorithm in seen:
             raise "AlgorithmError: allowed algorithms must be unique"
         seen[algorithm] = True
