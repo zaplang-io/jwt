@@ -137,8 +137,10 @@ uses the same JSON limits. Short/wrong signatures fail authentication. Signature
 comparison accumulates XOR differences over the entire fixed-length digest with
 no data-dependent early return in Zap source. The current compiler/stdlib does
 **not** provide a documented constant-time comparison guarantee; this package
-does not claim one. Generated-code auditing/core primitive work is tracked in
-[#5](https://github.com/zaplang-io/jwt/issues/5).
+does not claim one. A genuine guarantee needs a core primitive
+(`crypto.constant_time_eq`), requested in
+[zaplang-io/zap#729](https://github.com/zaplang-io/zap/issues/729); asymmetric
+verification compares inside OpenSSL and is unaffected.
 
 Failures raise catchable messages prefixed with `TokenError:`, `AlgorithmError:`,
 `HeaderError:`, `KeyError:`, `SignatureError:`, `ClaimsError:`, `PolicyError:`,
@@ -256,6 +258,44 @@ Asymmetric interop and binding vectors are generated from fixed test keys in
 with `python3 tools/generate-asym-vectors.py` followed by `zap fmt tests` (RS256
 and EdDSA reproduce byte-for-byte; ES256 uses a random nonce). Python and OpenSSL
 are only fixture-authoring tools, not runtime dependencies.
+
+## Conformance and release readiness
+
+Correctness is established against independent implementations, never by
+self-round-trip alone. The fixture corpus and its provenance:
+
+- **RFC known-answer vector** — `tests/rfc_vectors_test.zap` verifies the RFC 7515
+  Appendix A.1 HS256 JWS verbatim from the specification.
+- **Independent HMAC vectors** — `tests/vectors_test.zap`, `tests/jwk_vectors_test.zap`
+  from Python stdlib HMAC/SHA-2.
+- **Independent asymmetric vectors** — `tests/asym_vectors_test.zap` from the
+  OpenSSL CLI: external-sign→verify for every algorithm, plus deterministic
+  Zap-sign→external known-answer tokens for RS256 and EdDSA.
+- **Abuse/regression corpus** — `tests/compact_test.zap`, `tests/encoding_test.zap`,
+  `tests/claims_test.zap`, `tests/claims_wire_test.zap`, `tests/policy_test.zap`,
+  `tests/jwks_test.zap`, `tests/jwk_limits_test.zap`, `tests/asym_binding_test.zap`
+  and `tests/abuse_corpus_test.zap` cover malformed/tampered compact, JSON,
+  Unicode, header, claims and JWK inputs, algorithm confusion, and key binding.
+- **Durability** — `tests/stress_test.zap` repeats sign/verify across symmetric
+  and asymmetric algorithms under allocation pressure to exercise the GC.
+
+Packaging is validated by `sh tools/check-package.sh` (an isolated consumer plus
+`zap publish --dry-run`). CI runs every test in the pinned, published Zap compiler
+image (`.github/workflows/test.yml`); the digest is bumped deliberately and must
+carry every stdlib primitive this library uses. Signature comparison timing is
+documented above (no constant-time guarantee is claimed).
+
+Release checklist:
+
+1. `sh tools/run-tests.sh` and `sh tools/check-package.sh` green in CI on the
+   pinned image.
+2. Supported algorithms and key formats match the tables above; unsupported
+   inputs are rejected with tests.
+3. `README.md` documents the API, errors, limits, support matrix and the
+   unsupported set (HS384/RS384/…, `none`, JWE, detached/unencoded JWS, network
+   JWKS and automatic key discovery).
+4. `CHANGELOG.md` updated; `version` in `zap.toml` bumped.
+5. Publish only with the maintainer's explicit authorization.
 
 References: [JWS](https://www.rfc-editor.org/rfc/rfc7515),
 [JWA](https://www.rfc-editor.org/rfc/rfc7518),
