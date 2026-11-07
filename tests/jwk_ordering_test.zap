@@ -52,12 +52,7 @@ def expect(dict[str, JsonValue] fields, str message):
     if observed != message:
         raise "want [" + message + "] got [" + observed + "]"
 
-def expect_keyset(
-    str token,
-    jwt.KeySet keys,
-    list[str] algorithms,
-    str message,
-):
+def expect_keyset(str token, jwt.KeySet keys, list[str] algorithms, str message):
     auto observed = "accepted"
     try:
         jwt.decode_keyset_at(token, keys, algorithms, 100.0)
@@ -144,10 +139,6 @@ def main():
     # its unreachable `if len(family) == 0` guard is gone.
     auto token = jwt.encode_key({"exp": JsonValue.Int(200)}, good)
     auto keyset = jwt.KeySet([good])
-    expect_keyset(
-        token,
-        keyset,
-        ["BOGUS"],
-        "AlgorithmError: supported algorithms are HS256, HS512, RS256, ES256 and EdDSA",
-    )
+    auto bad_alg = "AlgorithmError: supported algorithms are HS256, HS512, RS256, ES256 and EdDSA"
+    expect_keyset(token, keyset, ["BOGUS"], bad_alg)
     print("JWK parser error ordering: PASS")
