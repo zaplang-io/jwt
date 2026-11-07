@@ -24,13 +24,25 @@ All notable changes to this package are documented here. This project adheres to
   - Public-key JWK loading for `RSA`, `EC`, and `OKP` keys and key sets.
   - Independent interop vectors (OpenSSL) and an exhaustive binding/abuse corpus.
 
+### Changed
+
+- Post-review cleanups from [#11](https://github.com/zaplang-io/jwt/issues/11):
+  - HMAC signature comparison now uses the stdlib `crypto.constant_time_eq`
+    primitive (OpenSSL `CRYPTO_memcmp`,
+    [zaplang-io/zap#757](https://github.com/zaplang-io/zap/pull/757) closing
+    [#729](https://github.com/zaplang-io/zap/issues/729)), replacing a hand-rolled
+    XOR compare whose constant-time property the compiler did not guarantee.
+  - JWK document load errors now report the specific cause (duplicate member,
+    non-object, invalid UTF-8, nesting overflow) while keeping the `JWKError:`
+    prefix, instead of collapsing to one opaque message.
+
 ### Notes
 
-- Signature comparison is not documented as constant-time; a core
-  `crypto.constant_time_eq` primitive is requested in
-  [zaplang-io/zap#729](https://github.com/zaplang-io/zap/issues/729).
+- Signature comparison is constant-time via the stdlib `crypto.constant_time_eq`
+  primitive; asymmetric verification compares inside OpenSSL.
 - CI pins the published Zap compiler image by digest; it carries the stdlib
-  asymmetric crypto primitives and the `zaplang-io/zap#727`/`#728` codegen fix.
+  asymmetric crypto primitives, `crypto.constant_time_eq`, and the
+  `zaplang-io/zap#727`/`#728` codegen fix.
 
 ## [0.1.0] — earlier
 

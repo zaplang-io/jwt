@@ -170,7 +170,10 @@ def _sign(bytes key, str message, str algorithm) -> bytes:
     if algorithm == "HS256":
         return crypto.hmac_sha256_raw(key, message)
     if algorithm == "HS512":
-        # Stdlib HS512 currently returns hex; decode once to the raw JWS signature.
+        # Stdlib HS512 currently returns lowercase hex (there is no hmac_sha512_raw
+        # counterpart to hmac_sha256_raw); decode it once to the raw JWS signature.
+        # This depends on that representation staying lowercase hex; if the stdlib
+        # ever changes it, this decode must change with it.
         return hex.decode(crypto.hmac_sha512(key, message))
     if algorithm == "RS256":
         return crypto.rsa_sha256_sign(key, message)
@@ -198,12 +201,14 @@ def _verify_sig(bytes key, str message, bytes signature, str algorithm) -> bool:
     raise "AlgorithmError: supported algorithms are HS256, HS512, RS256, ES256 and EdDSA"
 
 def _same_signature(bytes expected, bytes actual) -> bool:
-    if len(expected) != len(actual):
-        return False
-    auto difference = 0
-    for i in range(len(expected)):
-        difference = difference | expected[i] ^ actual[i]
-    return difference == 0
+    # Constant-time MAC comparison via the stdlib primitive (OpenSSL CRYPTO_memcmp,
+    # zaplang-io/zap#729 / #757). For the equal-length digests compared here it
+    # runs with no data-dependent branch, so verification time cannot leak how
+    # many leading bytes of the HMAC matched; a length difference is reported as a
+    # mismatch (the digest length is a public constant, so that channel is not
+    # secret). This replaces a hand-rolled XOR loop whose constant-time property
+    # the compiler did not guarantee.
+    return crypto.constant_time_eq(expected, actual)
 
 def _check_value(JsonValue value, int64 depth = 0):
     match value:
@@ -290,6 +295,10 @@ def verify_signature(str token, bytes key, str algorithm) -> VerifiedToken:
 
 # Trusted application configuration. Registered claims are always checked when
 # present; `required` controls which claims must also be present and non-null.
+# The `{}` / `[]` / `["exp"]` field defaults are mutable containers, but a Policy
+# is treated as read-only after construction — nothing in this module mutates a
+# policy field — so there is no shared-default aliasing hazard. Any future code
+# that needs to mutate a policy must copy the container first.
 struct Policy:
     dict[str, str] expected = {}
     list[str] audiences = []
@@ -463,6 +472,10 @@ def _key_record(Key key):
             _key(key.material, key.algorithm)
         else:
             # Key-set entries are public verification keys; reject private keys.
+            # This re-parses the key via crypto.key_info on every call (load, key-set
+            # validation, selection). That redundant parse is accepted deliberately:
+            # it keeps Key a plain immutable value with no cached-state field to keep
+            # in sync, and key-set sizes are bounded (<=64), so the cost is bounded.
             _check_asym_key(key.material, key.algorithm, False)
     except Exception:
         raise "JWKError: unsupported algorithm or insufficient key material"
@@ -637,8 +650,11 @@ def _jwk_document(str source) -> dict[str, JsonValue]:
         auto fields = _json_object(bytes(source))
         _check_value(JsonValue.Object(fields))
         return fields
-    except Exception:
-        raise "JWKError: invalid or duplicate-member JSON key document"
+    except Exception as e:
+        # Keep the JWKError: prefix callers switch on, but surface the specific
+        # cause (duplicate member, non-object, invalid UTF-8, nesting overflow)
+        # instead of collapsing every failure into one opaque message.
+        raise "JWKError: invalid key document: " + e
 
 def load_jwk(str source) -> Key:
     return _parse_jwk(_jwk_document(source))

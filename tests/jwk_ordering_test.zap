@@ -52,6 +52,25 @@ def expect(dict[str, JsonValue] fields, str message):
     if observed != message:
         raise "want [" + message + "] got [" + observed + "]"
 
+# Load a raw (possibly non-canonical) JSON source and assert the exact error.
+def expect_raw(str source, str message):
+    auto observed = "accepted"
+    try:
+        jwt.load_jwk(source)
+    except Exception as e:
+        observed = e
+    if observed != message:
+        raise "want [" + message + "] got [" + observed + "]"
+
+def expect_raw_prefix(str source, str prefix):
+    auto observed = "accepted"
+    try:
+        jwt.load_jwk(source)
+    except Exception as e:
+        observed = e
+    if not observed.startswith(prefix):
+        raise "want prefix [" + prefix + "] got [" + observed + "]"
+
 def expect_keyset(str token, jwt.KeySet keys, list[str] algorithms, str message):
     auto observed = "accepted"
     try:
@@ -141,4 +160,21 @@ def main():
     auto keyset = jwt.KeySet([good])
     auto bad_alg = "AlgorithmError: supported algorithms are HS256, HS512, RS256, ES256 and EdDSA"
     expect_keyset(token, keyset, ["BOGUS"], bad_alg)
+    # #11 item 6: document-level load errors keep the JWKError: prefix but now
+    # carry the specific cause instead of one opaque message.
+    expect_raw(
+        "{\"kty\":\"oct\",\"kty\":\"oct\"}",
+        "JWKError: invalid key document: TokenError: duplicate JSON member",
+    )
+    expect_raw(
+        "[]",
+        "JWKError: invalid key document: TokenError: JWT header and payload must be JSON objects",
+    )
+    # Malformed JSON still propagates under the prefix (parser text not pinned).
+    expect_raw_prefix("{", "JWKError: invalid key document:")
+    # The size guard runs before parsing, so it keeps its own specific message.
+    auto oversized = "x"
+    for i in range(20):
+        oversized = oversized + oversized
+    expect_raw(oversized + "x", "JWKError: key document exceeds 1048576 bytes")
     print("JWK parser error ordering: PASS")

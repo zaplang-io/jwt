@@ -9,10 +9,11 @@ jobs:
   assertions:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # zap main @ 13bbc9261 — ships the #643/#715 stdlib asymmetric crypto
-    # primitives (key_info, P-256/Ed25519 sign+verify, public-JWK import) together
-    # with the #727/#728 fix for indexed collection stores.
-    container: ghcr.io/zaplang-io/zap@sha256:75b5742507359a7268c038d6de7298e3d8e23aea66e0a2045fb0dff64cfb16cf
+    # zap main @ b98481ef — adds the #729/#757 constant-time compare primitive
+    # (crypto.constant_time_eq) on top of the #643/#715 stdlib asymmetric crypto
+    # primitives (key_info, P-256/Ed25519 sign+verify, public-JWK import) and the
+    # #727/#728 fix for indexed collection stores.
+    container: ghcr.io/zaplang-io/zap@sha256:b3a74c269bb9d71cd41c2530d9879bfe54a9b14894aedfa5540fb5acf260c785
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.3.0
       - run: zap fmt --check src tests

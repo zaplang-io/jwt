@@ -133,14 +133,15 @@ preserved but carry no trust or policy meaning.
 Limits: 50,000 compact token bytes; 4,096 decoded header bytes; 32,768 decoded
 payload bytes; 32 JSON container levels; 1,366 encoded signature characters (an
 8192-bit RSA signature; HMAC/ES256/EdDSA signatures are 86). Signing
-uses the same JSON limits. Short/wrong signatures fail authentication. Signature
-comparison accumulates XOR differences over the entire fixed-length digest with
-no data-dependent early return in Zap source. The current compiler/stdlib does
-**not** provide a documented constant-time comparison guarantee; this package
-does not claim one. A genuine guarantee needs a core primitive
-(`crypto.constant_time_eq`), requested in
-[zaplang-io/zap#729](https://github.com/zaplang-io/zap/issues/729); asymmetric
-verification compares inside OpenSSL and is unaffected.
+uses the same JSON limits. Short/wrong signatures fail authentication. HMAC
+signature comparison uses the stdlib `crypto.constant_time_eq` primitive (OpenSSL
+`CRYPTO_memcmp`,
+[zaplang-io/zap#729](https://github.com/zaplang-io/zap/issues/729) /
+[#757](https://github.com/zaplang-io/zap/pull/757)): equal-length digests are
+compared with no data-dependent branch, so verification time cannot reveal how
+many leading bytes matched. The digest length is a public constant, so the only
+observable timing signal (a length mismatch) leaks nothing secret. Asymmetric
+verification compares inside OpenSSL and has the same property.
 
 Failures raise catchable messages prefixed with `TokenError:`, `AlgorithmError:`,
 `HeaderError:`, `KeyError:`, `SignatureError:`, `ClaimsError:`, `PolicyError:`,
@@ -283,7 +284,7 @@ Packaging is validated by `sh tools/check-package.sh` (an isolated consumer plus
 `zap publish --dry-run`). CI runs every test in the pinned, published Zap compiler
 image (`.github/workflows/test.yml`); the digest is bumped deliberately and must
 carry every stdlib primitive this library uses. Signature comparison timing is
-documented above (no constant-time guarantee is claimed).
+documented above (constant-time via the stdlib `crypto.constant_time_eq`).
 
 Release checklist:
 
