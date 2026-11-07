@@ -33,9 +33,9 @@ def _is_hmac(str algorithm) -> bool:
 
 def _require_algorithm(str algorithm):
     # Reject any unsupported identifier before it reaches a signing primitive.
-    auto family = _algorithm_family(algorithm)
-    if len(family) == 0:
-        raise "AlgorithmError: unsupported algorithm"
+    # `_algorithm_family` raises for anything outside the supported set, so the
+    # call's side effect is the whole check; its return value is unused here.
+    _algorithm_family(algorithm)
 
 def _key_info_or_raise(bytes key) -> KeyInfo:
     # A single, uniform rejection for unparseable/unsupported/encrypted keys so
@@ -118,6 +118,11 @@ def _object(str text) -> dict[str, JsonValue]:
                 if depth > 0:
                     auto i = depth - 1
                     if objects[i] and want_key[i]:
+                        # `names[i]` is the same dict object stored in the list,
+                        # not a copy: Zap dicts are references, so `seen[s] = True`
+                        # below mutates the stored per-container key set in place.
+                        # This aliasing is load-bearing — the duplicate-member
+                        # rejection depends on those writes persisting in names[i].
                         dict[str, bool] seen = names[i]
                         if s in seen:
                             raise "TokenError: duplicate JSON member"
@@ -186,7 +191,11 @@ def _verify_sig(bytes key, str message, bytes signature, str algorithm) -> bool:
         return crypto.p256_sha256_verify(key, message, signature)
     if algorithm == "EdDSA":
         return crypto.ed25519_verify(key, message, signature)
-    return False
+    # Unreachable: every caller first passes `algorithm` through `_is_hmac` or
+    # `_check_asym_key`, both of which reject any identifier outside the five
+    # branches above. A terminal `raise` (mirroring `_sign`) states that as a
+    # programming error, rather than silently reporting an invalid signature.
+    raise "AlgorithmError: supported algorithms are HS256, HS512, RS256, ES256 and EdDSA"
 
 def _same_signature(bytes expected, bytes actual) -> bool:
     if len(expected) != len(actual):
@@ -467,11 +476,13 @@ struct _JwkMeta:
     bool can_sign
     bool can_verify
 
-# Parse the members common to every supported key type and reject certificate,
-# reference and critical-extension fields that this trusted-offline profile omits.
-def _jwk_meta(dict[str, JsonValue] fields) -> _JwkMeta:
-    auto kid = _jwk_string(fields, "kid")
-    auto algorithm = _jwk_string(fields, "alg")
+# Reject the certificate, reference and critical-extension fields this
+# trusted-offline profile omits, honour an optional "use":"sig", and resolve
+# "key_ops" into (can_sign, can_verify). `kid` and `algorithm` are already read
+# by the caller; every key type shares this tail so the rules live in one place.
+# Callers invoke this at the exact point their own check order requires, so the
+# oct and asym paths keep their existing, slightly different orderings.
+def _jwk_meta_from(str kid, str algorithm, dict[str, JsonValue] fields) -> _JwkMeta:
     for name in ["x5u", "x5c", "x5t", "x5t#S256", "jku", "jwk", "crit", "b64"]:
         if name in fields:
             raise "JWKError: unsupported key reference or extension"
@@ -508,6 +519,13 @@ def _jwk_meta(dict[str, JsonValue] fields) -> _JwkMeta:
                 raise "JWKError: key_ops must be an array"
     return _JwkMeta(kid, algorithm, can_sign, can_verify)
 
+# Parse the members common to every asymmetric key type: identifier and bound
+# algorithm first, then the shared extension/use/key_ops tail.
+def _jwk_meta(dict[str, JsonValue] fields) -> _JwkMeta:
+    auto kid = _jwk_string(fields, "kid")
+    auto algorithm = _jwk_string(fields, "alg")
+    return _jwk_meta_from(kid, algorithm, fields)
+
 # Decode a required fixed base64url integer/octet component (RSA n/e, EC x/y,
 # OKP x). The canonical unpadded base64url rule matches the compact profile.
 def _jwk_component(dict[str, JsonValue] fields, str name) -> bytes:
@@ -536,49 +554,20 @@ def _parse_oct_jwk(dict[str, JsonValue] fields) -> Key:
         raise "JWKError: only oct keys are supported"
     auto kid = _jwk_string(fields, "kid")
     auto algorithm = _jwk_string(fields, "alg")
+    # Unlike the asymmetric keys (whose component is read after the shared
+    # metadata tail), the oct secret is present-and-sized before that tail so the
+    # error order is preserved exactly: kty, kid, alg, k presence, k size, then
+    # the extension/use/key_ops checks that `_jwk_meta_from` performs.
     auto encoded = _jwk_string(fields, "k")
     if len(encoded) > 10923:
         raise "JWKError: encoded key material exceeds its limit"
-    for name in ["x5u", "x5c", "x5t", "x5t#S256", "jku", "jwk", "crit", "b64"]:
-        if name in fields:
-            raise "JWKError: unsupported key reference or extension"
-    if "use" in fields:
-        if _jwk_string(fields, "use") != "sig":
-            raise "JWKError: key use must be sig"
-    auto can_sign = True
-    auto can_verify = True
-    if "key_ops" in fields:
-        can_sign = False
-        can_verify = False
-        dict[str, bool] seen = {}
-        match fields["key_ops"]:
-            case JsonValue.Array(operations):
-                if len(operations) == 0:
-                    raise "JWKError: key_ops must not be empty"
-                for operation in operations:
-                    auto name = ""
-                    match operation:
-                        case JsonValue.Str(s):
-                            name = s
-                        case _:
-                            raise "JWKError: key_ops entries must be strings"
-                    if name in seen:
-                        raise "JWKError: duplicate key operation"
-                    seen[name] = True
-                    if name == "sign":
-                        can_sign = True
-                    elif name == "verify":
-                        can_verify = True
-                    else:
-                        raise "JWKError: key_ops only supports sign and verify"
-            case _:
-                raise "JWKError: key_ops must be an array"
+    auto meta = _jwk_meta_from(kid, algorithm, fields)
     auto material = b""
     try:
         material = _decode_segment(encoded)
     except Exception:
         raise "JWKError: k must be canonical unpadded base64url"
-    auto key = Key(kid, algorithm, material, can_sign, can_verify)
+    auto key = Key(kid, algorithm, material, meta.can_sign, meta.can_verify)
     _key_record(key)
     return key
 
