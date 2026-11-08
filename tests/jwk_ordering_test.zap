@@ -133,12 +133,16 @@ def main():
     rsa_wrong_alg["alg"] = JsonValue.Str("HS256")
     rsa_wrong_alg["d"] = JsonValue.Str("AA")
     expect(rsa_wrong_alg, "JWKError: RSA keys require the RS256 algorithm")
-    # Private members are rejected before any component is read.
+    # With item 9 a private `d` enters the private path via load_jwk (components
+    # are read n, e, d, p, q, dp, dq, qi), so this incomplete key fails on the
+    # first missing one rather than being rejected outright. Private keys are
+    # kept out of key sets instead (see tests/asym_private_jwk_test.zap).
     auto rsa_private = rsa_base()
     rsa_private["d"] = JsonValue.Str("AA")
-    expect(rsa_private, "JWKError: only public keys are supported")
+    expect(rsa_private, "JWKError: missing required key member n")
     expect(rsa_base(), "JWKError: missing required key member n")
-    # EC ordering: algorithm value, then curve, then private members.
+    # EC ordering: algorithm value, then curve, then (item 9) the private `d`
+    # builds a sign-only key; this stub scalar is rejected by the builder.
     auto ec_wrong_alg = ec_base()
     ec_wrong_alg["alg"] = JsonValue.Str("RS256")
     expect(ec_wrong_alg, "JWKError: EC keys require the ES256 algorithm")
@@ -146,13 +150,14 @@ def main():
     auto ec_private = ec_base()
     ec_private["crv"] = JsonValue.Str("P-256")
     ec_private["d"] = JsonValue.Str("AA")
-    expect(ec_private, "JWKError: only public keys are supported")
-    # OKP ordering: curve, then private members.
+    expect(ec_private, "JWKError: invalid EC private key parameters")
+    # OKP ordering: curve, then (item 9) the private `d` builds a sign-only key;
+    # this stub seed is rejected by the builder.
     expect(okp_base(), "JWKError: missing required key member crv")
     auto okp_private = okp_base()
     okp_private["crv"] = JsonValue.Str("Ed25519")
     okp_private["d"] = JsonValue.Str("AA")
-    expect(okp_private, "JWKError: only public keys are supported")
+    expect(okp_private, "JWKError: invalid OKP private key parameters")
     # Dead-code removal regression (#11 item 5): `_require_algorithm` still
     # rejects an unsupported algorithm on the key-set allowlist path, even though
     # its unreachable `if len(family) == 0` guard is gone.
