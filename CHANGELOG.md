@@ -48,6 +48,9 @@ All notable changes to this package are documented here. This project adheres to
 
 ### Notes
 
+- The committed asymmetric test keys under `tools/asym-fixtures/` (and the key
+  material embedded in the asymmetric test vectors) are intentionally test-only,
+  a reviewed decision for a public repository ([#11](https://github.com/zaplang-io/jwt/issues/11) item 11); they match the convention of PyJWT and `cryptography`.
 - Signature comparison is constant-time via the stdlib `crypto.constant_time_eq`
   primitive; asymmetric verification compares inside OpenSSL.
 - CI pins the published Zap compiler image by digest; it carries the stdlib
