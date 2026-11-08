@@ -791,3 +791,72 @@ def decode_keyset(
 ) -> dict[str, JsonValue]:
     auto verified = verify_keyset_signature(token, keys, algorithms)
     return _verified_claims(verified, policy, time.time())
+
+# Optional replay protection. A bounded, mutex-guarded set of recently seen `jti`
+# identifiers, each remembered only until its token's `exp`. It is opt-in and
+# caller-managed: build one ReplayCache for the window over which replays must be
+# rejected, share it across verifications (safe from multiple coroutines), and
+# call `replay_admit`/`replay_admit_at` after a token's claims have validated.
+# decode/decode_at deliberately do not touch it, so single-use verification stays
+# allocation-free and stateless.
+struct ReplayCache:
+    bytes mutex
+    dict[str, float64] seen
+    int64 capacity
+
+def new_replay_cache(int64 capacity = 4096) -> ReplayCache:
+    if capacity < 1 or capacity > 1048576:
+        raise "PolicyError: replay cache capacity must be 1 through 1048576"
+    return ReplayCache(sync.mutex(), {}, capacity)
+
+def _prune_expired(ReplayCache cache, float64 now):
+    # Called while holding cache.mutex. Forget entries whose exp has passed: an
+    # expired token is already rejected by claims validation, so dropping its jti
+    # can never admit a replay.
+    list[str] stale = []
+    for jti in cache.seen:
+        if cache.seen[jti] <= now:
+            stale.append(jti)
+    for jti in stale:
+        del cache.seen[jti]
+
+def replay_admit_at(ReplayCache cache, dict[str, JsonValue] claims, float64 now):
+    # Reject a token whose jti was already admitted and has not yet expired;
+    # otherwise record it. Requires both jti (so a replay can be recognised) and
+    # exp (so the entry can be bounded and eventually forgotten). Validate the
+    # claim shapes before locking, decide under the lock, and raise only after
+    # releasing it so the mutex is never held across a raise.
+    if not "jti" in claims:
+        raise "ClaimsError: jti is required for replay protection"
+    auto jti = _claim_string(claims["jti"], "jti")
+    if len(bytes(jti)) == 0:
+        raise "ClaimsError: jti must not be empty"
+    if len(bytes(jti)) > 256:
+        raise "ClaimsError: jti exceeds 256 bytes"
+    if not "exp" in claims:
+        raise "ClaimsError: exp is required for replay protection"
+    auto exp = _date(claims["exp"], "exp")
+    if not _finite_date(now):
+        raise "PolicyError: clock must return a finite supported NumericDate"
+    sync.lock(cache.mutex)
+    auto status = 0
+    if jti in cache.seen and cache.seen[jti] > now:
+        # A live, unexpired entry with this jti already exists: this is a replay.
+        status = 1
+    else:
+        # The jti is new, or its prior token has expired and may be forgotten.
+        if not jti in cache.seen:
+            if len(cache.seen) >= cache.capacity:
+                _prune_expired(cache, now)
+            if len(cache.seen) >= cache.capacity:
+                status = 2
+        if status == 0:
+            cache.seen[jti] = exp
+    sync.unlock(cache.mutex)
+    if status == 1:
+        raise "ClaimsError: token replay detected"
+    if status == 2:
+        raise "ClaimsError: replay cache capacity exceeded"
+
+def replay_admit(ReplayCache cache, dict[str, JsonValue] claims):
+    replay_admit_at(cache, claims, time.time())

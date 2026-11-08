@@ -7,6 +7,11 @@ All notable changes to this package are documented here. This project adheres to
 
 ### Added
 
+- Opt-in replay protection ([#11](https://github.com/zaplang-io/jwt/issues/11) item 10):
+  a `ReplayCache` type with `new_replay_cache(capacity)` and
+  `replay_admit`/`replay_admit_at`. The cache is a bounded, mutex-guarded set of
+  seen `jti` values (each kept only until its token's `exp`) and is checked by the
+  caller after claims validation; `decode`/`verify_signature` stay stateless.
 - Conformance and release-readiness suite ([#5](https://github.com/zaplang-io/jwt/issues/5)):
   - RFC 7515 Appendix A.1 (HS256) known-answer vector (`tests/rfc_vectors_test.zap`).
   - Consolidated abuse/regression corpus for malformed structure, signature

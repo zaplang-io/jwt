@@ -260,6 +260,29 @@ with `python3 tools/generate-asym-vectors.py` followed by `zap fmt tests` (RS256
 and EdDSA reproduce byte-for-byte; ES256 uses a random nonce). Python and OpenSSL
 are only fixture-authoring tools, not runtime dependencies.
 
+## Replay protection
+
+Replay protection is **opt-in** and caller-managed. `decode`/`verify_signature`
+are deliberately stateless; to reject a token whose `jti` has already been
+presented, build a `ReplayCache` and call `replay_admit` (or `replay_admit_at`
+with an explicit clock) **after** the token's claims have validated:
+
+```zap
+auto cache = jwt.new_replay_cache()        # optional: new_replay_cache(capacity)
+
+auto claims = jwt.decode(token, key, "HS256", policy)
+jwt.replay_admit(cache, claims)            # raises ClaimsError on a replay
+```
+
+A `ReplayCache` is a bounded, mutex-guarded set of seen `jti` values and is safe
+to share across coroutines. Each entry is remembered only until the token's `exp`
+(so the memory is bounded by the number of live tokens, and a `jti` may be reused
+once its earlier token has expired); `replay_admit` therefore requires both a
+string `jti` (≤ 256 bytes) and an `exp`, and raises `ClaimsError` on a live
+replay or when a full cache cannot admit a new identifier. The cache lives for as
+long as the caller keeps it — scope one per trust domain and discard it to forget
+all history.
+
 ## Conformance and release readiness
 
 Correctness is established against independent implementations, never by
