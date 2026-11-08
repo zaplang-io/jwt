@@ -7,6 +7,16 @@ All notable changes to this package are documented here. This project adheres to
 
 ### Added
 
+- Private-JWK signing ([#11](https://github.com/zaplang-io/jwt/issues/11) item 9):
+  `load_jwk` now accepts a private `RSA` (full CRT), `EC`, or `OKP` JWK and returns
+  a sign-only `Key` usable with `encode_key`, built through the stdlib
+  `crypto.*_private_key_pem` primitives ([zaplang-io/zap#778](https://github.com/zaplang-io/zap/issues/778)).
+  Key sets stay public-only: a private member in a JWKS is rejected.
+- Opt-in replay protection ([#11](https://github.com/zaplang-io/jwt/issues/11) item 10):
+  a `ReplayCache` type with `new_replay_cache(capacity)` and
+  `replay_admit`/`replay_admit_at`. The cache is a bounded, mutex-guarded set of
+  seen `jti` values (each kept only until its token's `exp`) and is checked by the
+  caller after claims validation; `decode`/`verify_signature` stay stateless.
 - Conformance and release-readiness suite ([#5](https://github.com/zaplang-io/jwt/issues/5)):
   - RFC 7515 Appendix A.1 (HS256) known-answer vector (`tests/rfc_vectors_test.zap`).
   - Consolidated abuse/regression corpus for malformed structure, signature
@@ -38,6 +48,9 @@ All notable changes to this package are documented here. This project adheres to
 
 ### Notes
 
+- The committed asymmetric test keys under `tools/asym-fixtures/` (and the key
+  material embedded in the asymmetric test vectors) are intentionally test-only,
+  a reviewed decision for a public repository ([#11](https://github.com/zaplang-io/jwt/issues/11) item 11); they match the convention of PyJWT and `cryptography`.
 - Signature comparison is constant-time via the stdlib `crypto.constant_time_eq`
   primitive; asymmetric verification compares inside OpenSSL.
 - CI pins the published Zap compiler image by digest; it carries the stdlib

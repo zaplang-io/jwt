@@ -1,8 +1,15 @@
 # Asymmetric test key fixtures
 
 Fixed **test-only** key pairs used by `tools/generate-asym-vectors.py` to author
-the committed interop and binding vectors. They are not secrets and must never
-be used in production.
+the committed interop, binding, and private-JWK vectors. They are not secrets and
+must never be used in production.
+
+Committing these test-only private keys to a public repository is an intentional,
+reviewed decision (issue #11 item 11): the key material exists solely to make the
+test vectors reproducible and self-contained, it protects nothing, and the
+private-JWK signing tests embed the same material because the language has no
+runtime keypair generation. This mirrors the convention of PyJWT and the Python
+`cryptography` project, whose test suites likewise commit fixed test keys.
 
 | File | Purpose |
 | --- | --- |
