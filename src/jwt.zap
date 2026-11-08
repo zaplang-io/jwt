@@ -801,7 +801,7 @@ def decode_keyset(
 # allocation-free and stateless.
 struct ReplayCache:
     bytes mutex
-    dict[str, float64] seen
+    dict[str, int64] seen
     int64 capacity
 
 def new_replay_cache(int64 capacity = 4096) -> ReplayCache:
@@ -815,7 +815,7 @@ def _prune_expired(ReplayCache cache, float64 now):
     # can never admit a replay.
     list[str] stale = []
     for jti in cache.seen:
-        if cache.seen[jti] <= now:
+        if float64(cache.seen[jti]) <= now:
             stale.append(jti)
     for jti in stale:
         del cache.seen[jti]
@@ -838,9 +838,16 @@ def replay_admit_at(ReplayCache cache, dict[str, JsonValue] claims, float64 now)
     auto exp = _date(claims["exp"], "exp")
     if not _finite_date(now):
         raise "PolicyError: clock must return a finite supported NumericDate"
+    # Collections cannot hold floats (ZAP4027), so the expiry is stored as an
+    # int64 rounded UP: a still-valid token is then never seen as expired (which
+    # would miss a replay), and the only cost of rounding up is that an entry is
+    # retained slightly longer than strictly necessary.
+    auto exp_i = int64(exp)
+    if float64(exp_i) < exp:
+        exp_i = exp_i + 1
     sync.lock(cache.mutex)
     auto status = 0
-    if jti in cache.seen and cache.seen[jti] > now:
+    if jti in cache.seen and float64(cache.seen[jti]) > now:
         # A live, unexpired entry with this jti already exists: this is a replay.
         status = 1
     else:
@@ -851,7 +858,7 @@ def replay_admit_at(ReplayCache cache, dict[str, JsonValue] claims, float64 now)
             if len(cache.seen) >= cache.capacity:
                 status = 2
         if status == 0:
-            cache.seen[jti] = exp
+            cache.seen[jti] = exp_i
     sync.unlock(cache.mutex)
     if status == 1:
         raise "ClaimsError: token replay detected"
