@@ -156,9 +156,11 @@ offline `oct`, `RSA`, `EC`, and `OKP` JWK/JWKS is supported below.
 
 For trusted offline key configuration, `load_jwk(json_text) -> Key` and
 `load_jwks(json_text) -> KeySet` validate `oct`, `RSA`, `EC`, and `OKP` JWKs.
-An `oct` JWK contains the shared secret: keep those documents private, rather than
-publishing them as a public JWKS endpoint. `RSA`, `EC`, and `OKP` JWKs are
-**public** verification keys and may be published. Load explicitly trusted
+An `oct` JWK contains the shared secret, and a single `RSA`/`EC`/`OKP` JWK may
+carry the private components too: keep those documents private, rather than
+publishing them as a JWKS endpoint. A `load_jwks` key set is always **public**
+verification keys and may be published — a private member in a key set is
+rejected, so a private key can never hide in a JWKS. Load explicitly trusted
 configuration; token headers never supply key documents or locations.
 
 Every JWK requires a nonempty `kid` and explicit `alg`. By key type:
@@ -166,20 +168,24 @@ Every JWK requires a nonempty `kid` and explicit `alg`. By key type:
 - `oct` (`alg` `HS256`/`HS512`): canonical unpadded base64url `k`; HMAC minimum
   key sizes remain 32/64 bytes. Permits sign and verify.
 - `RSA` (`alg` `RS256`): public components `n` and `e`; the modulus must be
-  2048–8192 bits. Private members (`d`, `p`, `q`, `dp`, `dq`, `qi`, `oth`) are
-  rejected.
+  2048–8192 bits. A full private key (`d` plus the CRT members `p`, `q`, `dp`,
+  `dq`, `qi`) loads via `load_jwk` as a sign-only key; stray private members
+  without `d`, or `oth`, are rejected.
 - `EC` (`alg` `ES256`): `crv="P-256"` and public coordinates `x`, `y`, validated
-  to lie on the curve. A private `d` member is rejected.
+  to lie on the curve. A private `d` member makes it a sign-only key via
+  `load_jwk`.
 - `OKP` (`alg` `EdDSA`): `crv="Ed25519"` and public key `x`. A private `d` member
-  is rejected.
+  makes it a sign-only key via `load_jwk`.
 
-`RSA`/`EC`/`OKP` keys are verification-only, so `key_ops` may not request `sign`.
-Optional `use` must be `sig`; optional `key_ops` must be a nonempty array of
-unique `sign` and/or `verify` values. Absent `key_ops` permits verification;
-present operations are enforced by the key-based APIs. Unsupported key types,
+A JWK with private components loads (via `load_jwk` only) as a **sign-only** key:
+it signs with `encode_key` but cannot verify, so `key_ops` may not request
+`verify`; a purely public `RSA`/`EC`/`OKP` JWK is verification-only and `key_ops`
+may not request `sign`. Optional `use` must be `sig`; optional `key_ops` must be a
+nonempty array of unique `sign` and/or `verify` values. Unsupported key types,
 algorithms, curves, certificate/reference fields and critical extensions are
 rejected. Unknown other metadata is ignored. Duplicate JSON members at any depth
-fail. `encode_key` signs only with an `oct` key; public keys cannot sign.
+fail. `encode_key` signs with an `oct` key or a private `RSA`/`EC`/`OKP` JWK;
+public keys cannot sign.
 
 `Key` exposes `kid`, `algorithm`, `material` (raw bytes), `can_sign`, and
 `can_verify`; `KeySet` holds `keys`. These are trusted, mutable configuration

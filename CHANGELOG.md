@@ -7,6 +7,11 @@ All notable changes to this package are documented here. This project adheres to
 
 ### Added
 
+- Private-JWK signing ([#11](https://github.com/zaplang-io/jwt/issues/11) item 9):
+  `load_jwk` now accepts a private `RSA` (full CRT), `EC`, or `OKP` JWK and returns
+  a sign-only `Key` usable with `encode_key`, built through the stdlib
+  `crypto.*_private_key_pem` primitives ([zaplang-io/zap#778](https://github.com/zaplang-io/zap/issues/778)).
+  Key sets stay public-only: a private member in a JWKS is rejected.
 - Opt-in replay protection ([#11](https://github.com/zaplang-io/jwt/issues/11) item 10):
   a `ReplayCache` type with `new_replay_cache(capacity)` and
   `replay_admit`/`replay_admit_at`. The cache is a bounded, mutex-guarded set of

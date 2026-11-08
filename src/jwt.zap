@@ -471,12 +471,15 @@ def _key_record(Key key):
         if _is_hmac(key.algorithm):
             _key(key.material, key.algorithm)
         else:
-            # Key-set entries are public verification keys; reject private keys.
-            # This re-parses the key via crypto.key_info on every call (load, key-set
-            # validation, selection). That redundant parse is accepted deliberately:
-            # it keeps Key a plain immutable value with no cached-state field to keep
-            # in sync, and key-set sizes are bounded (<=64), so the cost is bounded.
-            _check_asym_key(key.material, key.algorithm, False)
+            # A sign-only record (can_sign and not can_verify) carries a private
+            # key; every other asymmetric key — public verification keys and all
+            # key-set entries — must be public. key_info is re-parsed on each call
+            # (load, key-set validation, selection); the redundant parse is accepted
+            # so Key stays a plain immutable value and key sets are bounded (<=64).
+            if key.can_sign and not key.can_verify:
+                _check_asym_key(key.material, key.algorithm, True)
+            else:
+                _check_asym_key(key.material, key.algorithm, False)
     except Exception:
         raise "JWKError: unsupported algorithm or insufficient key material"
     if not key.can_sign and not key.can_verify:
@@ -552,14 +555,17 @@ def _jwk_component(dict[str, JsonValue] fields, str name) -> bytes:
     except Exception:
         raise "JWKError: key component must be canonical unpadded base64url: " + name
 
-def _parse_jwk(dict[str, JsonValue] fields) -> Key:
+# allow_private is true only for a single load_jwk (a private key yields a
+# sign-only Key); key sets stay public-only so a private key can never hide in a
+# JWKS. oct keys are symmetric, so the flag does not apply to them.
+def _parse_jwk(dict[str, JsonValue] fields, bool allow_private = False) -> Key:
     auto kty = _jwk_string(fields, "kty")
     if kty == "RSA":
-        return _parse_rsa_jwk(fields)
+        return _parse_rsa_jwk(fields, allow_private)
     if kty == "EC":
-        return _parse_ec_jwk(fields)
+        return _parse_ec_jwk(fields, allow_private)
     if kty == "OKP":
-        return _parse_okp_jwk(fields)
+        return _parse_okp_jwk(fields, allow_private)
     return _parse_oct_jwk(fields)
 
 def _parse_oct_jwk(dict[str, JsonValue] fields) -> Key:
@@ -598,11 +604,39 @@ def _public_jwk_key(_JwkMeta meta, dict[str, JsonValue] fields, bytes material) 
     _key_record(key)
     return key
 
-def _parse_rsa_jwk(dict[str, JsonValue] fields) -> Key:
+def _private_jwk_key(_JwkMeta meta, dict[str, JsonValue] fields, bytes material) -> Key:
+    # Private keys can only sign; verification uses the public key, so an explicit
+    # verify operation is contradictory. The resulting Key is sign-only, which is
+    # why _key_record and verify_signature never accept it as a verification key.
+    if "key_ops" in fields and meta.can_verify:
+        raise "JWKError: private keys cannot verify"
+    auto key = Key(meta.kid, meta.algorithm, material, meta.can_sign, False)
+    _key_record(key)
+    return key
+
+def _parse_rsa_jwk(dict[str, JsonValue] fields, bool allow_private) -> Key:
     auto meta = _jwk_meta(fields)
     if meta.algorithm != "RS256":
         raise "JWKError: RSA keys require the RS256 algorithm"
-    _reject_private_members(fields, ["d", "p", "q", "dp", "dq", "qi", "oth"])
+    if "d" in fields:
+        if not allow_private:
+            raise "JWKError: only public keys are supported"
+        # A private RSA JWK needs the full CRT parameter set for the stdlib builder.
+        auto n = _jwk_component(fields, "n")
+        auto e = _jwk_component(fields, "e")
+        auto d = _jwk_component(fields, "d")
+        auto p = _jwk_component(fields, "p")
+        auto q = _jwk_component(fields, "q")
+        auto dp = _jwk_component(fields, "dp")
+        auto dq = _jwk_component(fields, "dq")
+        auto qi = _jwk_component(fields, "qi")
+        auto priv = b""
+        try:
+            priv = crypto.rsa_private_key_pem(n, e, d, p, q, dp, dq, qi)
+        except Exception:
+            raise "JWKError: invalid RSA private key parameters"
+        return _private_jwk_key(meta, fields, priv)
+    _reject_private_members(fields, ["p", "q", "dp", "dq", "qi", "oth"])
     auto n_bytes = _jwk_component(fields, "n")
     auto e_bytes = _jwk_component(fields, "e")
     auto material = b""
@@ -612,13 +646,22 @@ def _parse_rsa_jwk(dict[str, JsonValue] fields) -> Key:
         raise "JWKError: invalid RSA public key parameters"
     return _public_jwk_key(meta, fields, material)
 
-def _parse_ec_jwk(dict[str, JsonValue] fields) -> Key:
+def _parse_ec_jwk(dict[str, JsonValue] fields, bool allow_private) -> Key:
     auto meta = _jwk_meta(fields)
     if meta.algorithm != "ES256":
         raise "JWKError: EC keys require the ES256 algorithm"
     if _jwk_string(fields, "crv") != "P-256":
         raise "JWKError: ES256 requires the P-256 curve"
-    _reject_private_members(fields, ["d"])
+    if "d" in fields:
+        if not allow_private:
+            raise "JWKError: only public keys are supported"
+        auto d = _jwk_component(fields, "d")
+        auto priv = b""
+        try:
+            priv = crypto.p256_private_key_pem(d)
+        except Exception:
+            raise "JWKError: invalid EC private key parameters"
+        return _private_jwk_key(meta, fields, priv)
     auto x_bytes = _jwk_component(fields, "x")
     auto y_bytes = _jwk_component(fields, "y")
     auto material = b""
@@ -628,13 +671,22 @@ def _parse_ec_jwk(dict[str, JsonValue] fields) -> Key:
         raise "JWKError: invalid EC public key parameters"
     return _public_jwk_key(meta, fields, material)
 
-def _parse_okp_jwk(dict[str, JsonValue] fields) -> Key:
+def _parse_okp_jwk(dict[str, JsonValue] fields, bool allow_private) -> Key:
     auto meta = _jwk_meta(fields)
     if meta.algorithm != "EdDSA":
         raise "JWKError: OKP keys require the EdDSA algorithm"
     if _jwk_string(fields, "crv") != "Ed25519":
         raise "JWKError: EdDSA requires the Ed25519 curve"
-    _reject_private_members(fields, ["d"])
+    if "d" in fields:
+        if not allow_private:
+            raise "JWKError: only public keys are supported"
+        auto d = _jwk_component(fields, "d")
+        auto priv = b""
+        try:
+            priv = crypto.ed25519_private_key_pem(d)
+        except Exception:
+            raise "JWKError: invalid OKP private key parameters"
+        return _private_jwk_key(meta, fields, priv)
     auto x_bytes = _jwk_component(fields, "x")
     auto material = b""
     try:
@@ -657,7 +709,9 @@ def _jwk_document(str source) -> dict[str, JsonValue]:
         raise "JWKError: invalid key document: " + e
 
 def load_jwk(str source) -> Key:
-    return _parse_jwk(_jwk_document(source))
+    # A single JWK may carry private components (-> a sign-only Key); load_jwks
+    # never passes allow_private, so a key set is always public verification keys.
+    return _parse_jwk(_jwk_document(source), True)
 
 def _key_set(KeySet keys):
     if len(keys.keys) == 0 or len(keys.keys) > 64:
